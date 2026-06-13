@@ -1,0 +1,12 @@
+{
+  "name": "typecover",
+  "version": "1.0.0",
+  "description": "Measure TypeScript type coverage. Find 'any', untyped params, and missing return types.",
+  "main": "index.js",
+  "bin": { "typecover": "./cli.js" },
+  "scripts": { "test": "node test.js" },
+  "keywords": ["typescript", "type-coverage", "any", "static-analysis", "code-quality"],
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/sulthonzh/typecover" },
+  "engines": { "node": ">=16" }
+}
