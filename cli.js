@@ -1,46 +1,88 @@
 #!/usr/bin/env node
 'use strict';
 
-const { analyze, formatReport } = require('./index.js');
+const { analyze, formatReport, checkCI } = require('./index.js');
 const path = require('path');
+
 const args = process.argv.slice(2);
+let target = '.';
+let threshold = 80;
+let verbose = true;
+let showFindings = false;
+let jsonOutput = false;
+let patterns = null;
 
-if (args.includes('--help') || args.includes('-h')) {
-  console.log(`
-typecover — Measure TypeScript type coverage
+for (let i = 0; i < args.length; i++) {
+  switch (args[i]) {
+    case '--threshold':
+    case '-t':
+      threshold = parseFloat(args[++i]) || 80;
+      break;
+    case '--json':
+    case '-j':
+      jsonOutput = true;
+      break;
+    case '--quiet':
+    case '-q':
+      verbose = false;
+      break;
+    case '--findings':
+    case '-f':
+      showFindings = true;
+      break;
+    case '--patterns':
+    case '-p':
+      patterns = args[++i].split(',');
+      break;
+    case '--help':
+    case '-h':
+      console.log(`
+  typecover — TypeScript Type Coverage Analyzer
 
-Usage:
-  typecover [dir] [options]
+  Usage:
+    typecover [path] [options]
 
-Options:
-  --json           Output as JSON
-  --min-severity   Minimum severity to report (error|warning|info) [default: info]
-  --ignore <str>   Comma-separated patterns to ignore in dir names
-  -h, --help       Show this help
+  Options:
+    -t, --threshold <n>   CI threshold percentage (default: 80)
+    -q, --quiet           Hide per-file breakdown
+    -f, --findings        Show individual findings
+    -j, --json            JSON output
+    -p, --patterns <ids>  Only check specific patterns (comma-separated)
+    -h, --help            Show this help
 
-Examples:
-  typecover ./src
-  typecover ./src --min-severity error --json
+  Patterns:
+    any-keyword, any-array, any-return, as-cast, angle-bracket-cast,
+    ts-ignore, ts-expect-error, ts-nocheck, non-null-assertion, force-unwraps
+
+  Examples:
+    typecover src/
+    typecover . --threshold 95 --findings
+    typecover src/ --patterns any-keyword,ts-ignore --json
 `);
-  process.exit(0);
+      process.exit(0);
+    default:
+      if (!args[i].startsWith('-')) target = args[i];
+  }
 }
 
-const dir = args.find(a => !a.startsWith('--')) || '.';
-const jsonOutput = args.includes('--json');
-const minSevIdx = args.indexOf('--min-severity');
-const minSeverity = minSevIdx !== -1 ? args[minSevIdx + 1] : 'info';
-const ignoreIdx = args.indexOf('--ignore');
-const ignore = ignoreIdx !== -1 ? (args[ignoreIdx + 1] || '').split(',').filter(Boolean) : [];
+const result = analyze(path.resolve(target), { patterns });
 
-const absDir = path.resolve(dir);
-const result = analyze(absDir, { ignore, minSeverity });
+if (result.error) {
+  console.error(`Error: ${result.error}`);
+  process.exit(1);
+}
 
 if (jsonOutput) {
   console.log(JSON.stringify(result, null, 2));
 } else {
-  console.log(formatReport(result));
+  console.log(formatReport(result, { verbose, showFindings }));
 }
 
-if (result.summary.grade === 'F' || result.summary.grade === 'D') {
-  process.exit(1);
+const passed = checkCI(result, threshold);
+if (!passed) {
+  if (!jsonOutput) {
+    console.log(`\n  ❌ Coverage ${result.summary.coverage}% is below threshold ${threshold}%\n`);
+  }
 }
+
+process.exit(passed ? 0 : 1);

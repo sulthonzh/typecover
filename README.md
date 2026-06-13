@@ -1,110 +1,104 @@
 # typecover
 
-Measure TypeScript type coverage. Find `any`, untyped params, missing return types, and `@ts-ignore` abuse.
+Analyze TypeScript codebases for type safety coverage.
+
+Scans your `.ts`/`.tsx` files for unsafe patterns like `any`, type assertions, `@ts-ignore`, non-null assertions, and more. Gives you a coverage percentage and letter grade so you can track type safety over time.
 
 ## Why?
 
-TypeScript's compiler only tells you about errors — it doesn't tell you how *well-typed* your code is. A project can compile clean while being riddled with `any`, untyped parameters, and zero return type annotations.
-
-`typecover` scans your `.ts`/`.tsx` files and gives you a coverage score: what percentage of your code actually has proper types.
+TypeScript's compiler tells you about errors, but it doesn't tell you how *safe* your types actually are. A codebase can compile cleanly while being full of `any`, `as` casts, and `@ts-ignore` escapes. `typecover` measures the gap.
 
 ## Install
 
 ```bash
 npm install -g typecover
-```
-
-Or use without installing:
-
-```bash
+# or
 npx typecover ./src
 ```
 
 ## Usage
 
 ```bash
-# Scan a directory
-typecover ./src
+# Analyze current directory
+typecover
 
-# JSON output for CI
-typecover ./src --json
+# Analyze specific path
+typecover src/
 
-# Only show errors (no warnings/info)
-typecover ./src --min-severity error
+# Set CI threshold (fails if coverage below 90%)
+typecover src/ --threshold 90
 
-# Ignore certain directories
-typecover ./src --ignore generated,vendor
+# Show individual findings
+typecover src/ --findings
+
+# JSON output for tooling
+typecover src/ --json
+
+# Only check specific patterns
+typecover src/ --patterns any-keyword,ts-ignore
+
+# Quiet mode (summary only)
+typecover src/ --quiet
 ```
 
 ## What It Detects
 
-| Check | Severity | Description |
-|-------|----------|-------------|
-| `explicit-any` | error | Direct use of `any` type annotation |
-| `as-any` | error | `as any` type casts |
-| `untyped-param` | warning | Function parameters without type annotations |
-| `ts-ignore` | warning | `@ts-ignore` directives |
-| `ts-nocheck` | error | `@ts-nocheck` disabling type checking |
-| `missing-return-type` | info | Functions without return type annotations |
-| `untyped-var` | info | Variables declared without type or initializer |
+| Pattern | Severity | Description |
+|---------|----------|-------------|
+| `any-keyword` | High | `const x: any` |
+| `any-array` | High | `const x: any[]` |
+| `any-return` | High | `function foo(): any` |
+| `as-cast` | Medium | `x as string` |
+| `angle-bracket-cast` | Medium | `<string>x` |
+| `ts-ignore` | High | `// @ts-ignore` |
+| `ts-expect-error` | Medium | `// @ts-expect-error` |
+| `ts-nocheck` | Critical | `// @ts-nocheck` |
+| `non-null-assertion` | Low | `obj!.prop` |
+| `force-unwraps` | Low | `arr!` |
 
-## Output
+## Coverage Grades
 
-```
-  ╔══════════════════════════════════════╗
-  ║        TypeCover Analysis            ║
-  ╚══════════════════════════════════════╝
-
-  Files scanned:    24
-  Issues found:     13
-  Lines of code:    892
-
-  Coverage
-  ────────
-  Parameters:   [██████████] 100%
-  Return types: [██████░░░░] 62.5%
-  Overall:      [█████████░] 91.2%
-
-  Grade: 🟢 A
-```
+| Range | Grade |
+|-------|-------|
+| 98-100% | A+ |
+| 95-97% | A |
+| 90-94% | A- |
+| 85-89% | B+ |
+| 80-84% | B |
+| 75-79% | B- |
+| 70-74% | C+ |
+| 65-69% | C |
+| 60-64% | C- |
+| 50-59% | D |
+| 0-49% | F |
 
 ## Programmatic API
 
 ```js
-const { analyze, formatReport } = require('typecover');
+const { analyze, formatReport, checkCI } = require('typecover');
 
-const result = analyze('./src', {
-  ignore: ['generated'],
-  minSeverity: 'warning',
-});
+const result = analyze('./src');
+console.log(formatReport(result, { verbose: true, showFindings: true }));
 
-console.log(formatReport(result));
-// or use result.summary, result.files directly
+if (!checkCI(result, 85)) {
+  process.exit(1);
+}
 ```
 
 ## CI Integration
 
-The CLI exits with code 1 if the grade is D or F, making it easy to add to CI:
+Add to your CI pipeline:
 
 ```yaml
-# GitHub Actions
 - name: Type coverage check
-  run: npx typecover ./src --min-severity error
+  run: npx typecover src/ --threshold 90
 ```
 
-## Grade Scale
+Exit code is 1 if coverage falls below the threshold.
 
-| Grade | Score | Meaning |
-|-------|-------|---------|
-| A | 95-100% | Excellent type coverage |
-| B | 85-94% | Good, minor gaps |
-| C | 70-84% | Fair, could improve |
-| D | 50-69% | Poor, significant `any` usage |
-| F | 0-49% | Critical, types mostly missing |
+## Zero Dependencies
 
-## How It Works
-
-Static regex-based scanning (no TypeScript compiler dependency). Fast, zero-config, works on any `.ts`/`.tsx` project. Skips `.d.ts` declaration files and `node_modules`.
+No external dependencies. Pure Node.js.
 
 ## License
 

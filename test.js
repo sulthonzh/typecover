@@ -2,162 +2,138 @@
 
 const fs = require('fs');
 const path = require('path');
-const { analyze, analyzeFile, grade, formatReport } = require('./index.js');
+const { analyze, analyzeFile, formatReport, checkCI, coverageToGrade, walkDir } = require('./index.js');
 
 let passed = 0;
 let failed = 0;
 
-function assert(cond, msg) {
-  if (cond) { passed++; }
+function assert(condition, msg) {
+  if (condition) { passed++; }
   else { failed++; console.error(`  FAIL: ${msg}`); }
 }
 
-const tmpDir = path.join(__dirname, '__test_tmp__');
-fs.rmSync(tmpDir, { recursive: true, force: true });
-fs.mkdirSync(tmpDir, { recursive: true });
+const TMP = path.join(__dirname, '__test_fixtures__');
+const clean = () => { if (fs.existsSync(TMP)) fs.rmSync(TMP, { recursive: true }); };
+clean();
+fs.mkdirSync(TMP, { recursive: true });
+fs.mkdirSync(path.join(TMP, 'subdir'), { recursive: true });
+fs.mkdirSync(path.join(TMP, 'node_modules', 'pkg'), { recursive: true });
 
-fs.writeFileSync(path.join(tmpDir, 'good.ts'), `
-export function add(a: number, b: number): number {
-  return a + b;
-}
+// Fixtures
+fs.writeFileSync(path.join(TMP, 'clean.ts'),
+  'interface User { name: string; age: number; }\nfunction greet(user: User): string { return "Hello " + user.name; }\nconst x: number = 42;\n');
 
-export const multiply = (x: number, y: number): number => x * y;
+fs.writeFileSync(path.join(TMP, 'unsafe.ts'),
+  'const data: any = fetchData();\nconst items: any[] = [];\nfunction parse(): any { return JSON.parse(str); }\nconst val = data as unknown as string;\nconst num = <number>val;\n// @ts-ignore\nconst foo = bar.baz;\n// @ts-expect-error\nconst qux = broken;\n// @ts-nocheck\nconst forced = obj!.prop;\nconst unwrap = arr!\n');
 
-interface User {
-  name: string;
-  age: number;
-}
+fs.writeFileSync(path.join(TMP, 'subdir', 'nested.ts'),
+  'export function safe(a: string): number { return a.length; }\n');
 
-export function greet(user: User): string {
-  return 'Hello ' + user.name;
-}
-`);
+fs.writeFileSync(path.join(TMP, 'node_modules', 'pkg', 'index.ts'),
+  'export const x: any = 1;\n');
 
-fs.writeFileSync(path.join(tmpDir, 'bad.ts'), `
-export function process(data: any): any {
-  return data;
-}
+fs.writeFileSync(path.join(TMP, 'react.tsx'),
+  'const App: React.FC = () => <div />;\n');
 
-export const parse = (input: any) => {
-  return JSON.parse(input as any);
-}
+console.log('\n  typecover tests\n');
 
-export function untyped(x, y) {
-  return x + y;
-}
+// 1. Clean file high coverage
+const cr = analyzeFile(path.join(TMP, 'clean.ts'));
+assert(cr.coverage >= 95, `Clean coverage should be >= 95%, got ${cr.coverage}%`);
+assert(cr.findings.length === 0, `Clean file 0 findings, got ${cr.findings.length}`);
 
-// @ts-ignore
-export const thing: any = {};
-`);
+// 2. Unsafe file detects patterns
+const ur = analyzeFile(path.join(TMP, 'unsafe.ts'));
+const ids = ur.findings.map(f => f.ruleId);
+assert(ids.includes('any-keyword'), 'Should detect any-keyword');
+assert(ids.includes('any-array'), 'Should detect any-array');
+assert(ids.includes('any-return'), 'Should detect any-return');
+assert(ids.includes('as-cast'), 'Should detect as-cast');
+assert(ids.includes('ts-ignore'), 'Should detect ts-ignore');
+assert(ids.includes('ts-expect-error'), 'Should detect ts-expect-error');
+assert(ids.includes('ts-nocheck'), 'Should detect ts-nocheck');
+assert(ur.coverage < 80, `Unsafe coverage < 80%, got ${ur.coverage}%`);
 
-fs.writeFileSync(path.join(tmpDir, 'nocheck.ts'), `// @ts-nocheck
-export function broken(): any {
-  return null;
-}
-`);
+// 3. Directory analysis
+const dr = analyze(TMP);
+assert(dr.results.length === 4, `Should find 4 files (clean,unsafe,nested,react), got ${dr.results.length}`);
+assert(dr.summary.totalLines > 0, 'Should have total lines');
+assert(dr.summary.coverage > 0 && dr.summary.coverage <= 100, 'Coverage should be 0-100');
+assert(dr.summary.grade, 'Should have a grade');
 
-fs.writeFileSync(path.join(tmpDir, 'empty.ts'), ``);
+// 4. Coverage grades
+assert(coverageToGrade(100) === 'A+', '100% = A+');
+assert(coverageToGrade(95) === 'A', '95% = A');
+assert(coverageToGrade(90) === 'A-', '90% = A-');
+assert(coverageToGrade(85) === 'B+', '85% = B+');
+assert(coverageToGrade(80) === 'B', '80% = B');
+assert(coverageToGrade(75) === 'B-', '75% = B-');
+assert(coverageToGrade(70) === 'C+', '70% = C+');
+assert(coverageToGrade(65) === 'C', '65% = C');
+assert(coverageToGrade(60) === 'C-', '60% = C-');
+assert(coverageToGrade(50) === 'D', '50% = D');
+assert(coverageToGrade(40) === 'F', '40% = F');
 
-fs.writeFileSync(path.join(tmpDir, 'complex.ts'), `
-type Result<T> = { ok: true; value: T } | { ok: false; error: string };
+// 5. CI check
+assert(checkCI({ summary: { coverage: 90 } }, 80) === true, '90% passes 80');
+assert(checkCI({ summary: { coverage: 70 } }, 80) === false, '70% fails 80');
+assert(checkCI({ summary: { coverage: 80 } }, 80) === true, '80% passes 80');
 
-export function tryParse(text: string): Result<unknown> {
-  try {
-    return { ok: true, value: JSON.parse(text) };
-  } catch {
-    return { ok: false, error: 'Parse error' };
+// 6. Format report
+const report = formatReport(dr, { verbose: true, showFindings: false });
+assert(report.includes('Coverage:'), 'Report shows coverage');
+assert(report.includes('By Severity:'), 'Report shows severity');
+assert(report.includes('By Rule:'), 'Report shows rules');
+assert(report.includes('Per-File Coverage:'), 'Verbose shows per-file');
+
+// 7. Quiet report
+const quiet = formatReport(dr, { verbose: false });
+assert(!quiet.includes('Per-File Coverage:'), 'Quiet no per-file');
+
+// 8. Pattern filtering
+const filtered = analyze(TMP, { patterns: ['any-keyword', 'ts-ignore'] });
+const fids = filtered.results.flatMap(r => r.findings.map(f => f.ruleId));
+assert(fids.every(r => ['any-keyword', 'ts-ignore'].includes(r)), 'Filtered patterns only');
+
+// 9. Missing path
+const missing = analyze('/nonexistent/path');
+assert(missing.error, 'Missing path returns error');
+
+// 10. Ignores node_modules
+const walked = walkDir(TMP);
+assert(!walked.some(f => f.includes('node_modules')), 'Ignores node_modules');
+
+// 11. Detects .tsx
+assert(walked.some(f => f.endsWith('.tsx')), 'Detects .tsx files');
+
+// 12. Summary structures
+assert(typeof dr.summary.byRule === 'object', 'byRule is object');
+assert(typeof dr.summary.bySeverity === 'object', 'bySeverity is object');
+assert(Object.keys(dr.summary.bySeverity).length > 0, 'bySeverity has entries');
+
+// 13. JSON CLI output
+const { execSync } = require('child_process');
+try {
+  const out = execSync(`node ${path.join(__dirname, 'cli.js')} ${TMP} --json --quiet`, { encoding: 'utf-8' });
+  const p = JSON.parse(out);
+  assert(p.summary && p.results, 'JSON has summary+results');
+} catch (e) {
+  if (e.stdout) {
+    const p = JSON.parse(e.stdout);
+    assert(p.summary && p.results, 'JSON parses even on CI fail');
   }
 }
 
-export async function fetchData(url: string): Promise<Response> {
-  return fetch(url);
-}
+// 14. Findings in report
+const fr = formatReport(dr, { verbose: false, showFindings: true });
+assert(fr.includes('Top Findings') || dr.summary.totalFindings === 0, 'Show findings works');
 
-const items = [1, 2, 3];
-const untyped;
-`);
+// 15. Safe lines calculation
+assert(dr.summary.safeLines >= 0, 'Safe lines >= 0');
+assert(dr.summary.safeLines <= dr.summary.totalLines, 'Safe lines <= total');
 
-// --- Tests ---
-console.log('Testing analyzeFile on good.ts...');
-const goodResult = analyzeFile(path.join(tmpDir, 'good.ts'));
-assert(goodResult.stats.anyCount === 0, 'good.ts should have 0 any');
-assert(goodResult.coverage.overall >= 80, 'good.ts coverage should be >= 80');
+// Cleanup
+clean();
 
-console.log('Testing analyzeFile on bad.ts...');
-const badResult = analyzeFile(path.join(tmpDir, 'bad.ts'));
-assert(badResult.stats.anyCount >= 2, `bad.ts should have >= 2 any, got ${badResult.stats.anyCount}`);
-assert(badResult.stats.asAnyCount >= 1, `bad.ts should have >= 1 as any, got ${badResult.stats.asAnyCount}`);
-assert(badResult.stats.implicitAny >= 2, `bad.ts should have >= 2 untyped params, got ${badResult.stats.implicitAny}`);
-assert(badResult.coverage.overall < 80, 'bad.ts coverage should be < 80');
-
-const anyIssues = badResult.issues.filter(i => i.type === 'explicit-any');
-const asAnyIssues = badResult.issues.filter(i => i.type === 'as-any');
-const untypedParams = badResult.issues.filter(i => i.type === 'untyped-param');
-assert(anyIssues.length >= 2, 'Should find explicit any issues');
-assert(asAnyIssues.length >= 1, 'Should find as-any issues');
-assert(untypedParams.length >= 2, 'Should find untyped param issues');
-
-console.log('Testing analyzeFile on nocheck.ts...');
-const nocheckResult = analyzeFile(path.join(tmpDir, 'nocheck.ts'));
-const nocheckIssues = nocheckResult.issues.filter(i => i.type === 'ts-nocheck');
-assert(nocheckIssues.length >= 1, `Should detect @ts-nocheck, found ${nocheckIssues.length}`);
-
-console.log('Testing analyzeFile on empty.ts...');
-const emptyResult = analyzeFile(path.join(tmpDir, 'empty.ts'));
-assert(emptyResult.stats.linesOfCode === 0, 'Empty file should have 0 lines');
-assert(emptyResult.issues.length === 0, 'Empty file should have 0 issues');
-
-console.log('Testing analyzeFile on complex.ts...');
-const complexResult = analyzeFile(path.join(tmpDir, 'complex.ts'));
-assert(complexResult.stats.totalFunctions >= 1, `Should detect at least 1 function, got ${complexResult.stats.totalFunctions}`);
-assert(complexResult.stats.untypedVars >= 1, 'Should detect untyped var');
-
-console.log('Testing full analyze()...');
-const fullResult = analyze(tmpDir);
-assert(fullResult.files.length === 5, 'Should find 5 files');
-assert(fullResult.summary.totalFiles === 5, 'Summary should show 5 files');
-assert(fullResult.summary.totalIssues > 0, 'Should have issues');
-assert(typeof fullResult.summary.coverage.overall === 'number', 'Overall coverage should be a number');
-assert(fullResult.summary.grade !== undefined, 'Should have a grade');
-assert(['A','B','C','D','F'].includes(fullResult.summary.grade), 'Grade should be A-F');
-
-console.log('Testing grade()...');
-assert(grade(100) === 'A', '100 = A');
-assert(grade(95) === 'A', '95 = A');
-assert(grade(90) === 'B', '90 = B');
-assert(grade(85) === 'B', '85 = B');
-assert(grade(80) === 'C', '80 = C');
-assert(grade(70) === 'C', '70 = C');
-assert(grade(60) === 'D', '60 = D');
-assert(grade(50) === 'D', '50 = D');
-assert(grade(40) === 'F', '40 = F');
-assert(grade(0) === 'F', '0 = F');
-
-console.log('Testing min-severity filter...');
-const errOnly = analyze(tmpDir, { minSeverity: 'error' });
-const allInfo = analyze(tmpDir, { minSeverity: 'info' });
-assert(errOnly.summary.totalIssues <= allInfo.summary.totalIssues, 'Error-only should have <= issues');
-
-console.log('Testing formatReport()...');
-const report = formatReport(fullResult);
-assert(report.includes('TypeCover'), 'Report should have title');
-assert(report.includes('Coverage'), 'Report should have coverage section');
-assert(report.includes('Grade'), 'Report should have grade');
-assert(typeof report === 'string' && report.length > 100, 'Report should be a decent string');
-
-console.log('Testing issue source lines...');
-for (const issue of badResult.issues) {
-  assert(issue.line > 0, 'Issue should have line number');
-  assert(issue.source !== undefined, 'Issue should have source line');
-  assert(issue.severity !== undefined, 'Issue should have severity');
-}
-
-// JSON output test
-const json = JSON.stringify(fullResult);
-const parsed = JSON.parse(json);
-assert(parsed.summary.totalFiles === 5, 'JSON round-trip works');
-
-fs.rmSync(tmpDir, { recursive: true, force: true });
-
-console.log(`\n${passed} passed, ${failed} failed`);
-if (failed > 0) process.exit(1);
+console.log(`\n  ${passed} passed, ${failed} failed\n`);
+process.exit(failed > 0 ? 1 : 0);

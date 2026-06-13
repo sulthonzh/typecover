@@ -1,12 +1,13 @@
 {
   "name": "typecover",
   "version": "1.0.0",
-  "description": "Measure TypeScript type coverage. Find 'any', untyped params, and missing return types.",
+  "description": "Analyze TypeScript codebases for type safety coverage. Find unsafe patterns like any, type assertions, ts-ignore, and more.",
   "main": "index.js",
   "bin": { "typecover": "./cli.js" },
   "scripts": { "test": "node test.js" },
-  "keywords": ["typescript", "type-coverage", "any", "static-analysis", "code-quality"],
+  "keywords": ["typescript", "type-coverage", "type-safety", "any", "ts-ignore", "lint", "static-analysis"],
+  "author": "sulthonzh",
   "license": "MIT",
-  "repository": { "type": "git", "url": "https://github.com/sulthonzh/typecover" },
-  "engines": { "node": ">=16" }
+  "engines": { "node": ">=16" },
+  "files": ["index.js", "cli.js", "README.md"]
 }

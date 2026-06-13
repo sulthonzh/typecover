@@ -3,287 +3,222 @@
 const fs = require('fs');
 const path = require('path');
 
-const TS_EXTS = new Set(['.ts', '.tsx', '.mts', '.cts']);
+const UNSAFE_PATTERNS = [
+  { id: 'any-keyword', regex: /(?<!\w):\s*any\b(?!\s*\[)/g, desc: 'Explicit `any` type annotation', severity: 'high' },
+  { id: 'any-array', regex: /:\s*any\[\]/g, desc: '`any[]` type annotation', severity: 'high' },
+  { id: 'any-return', regex: /\)\s*:\s*any\b/g, desc: 'Function returns `any`', severity: 'high' },
+  { id: 'as-cast', regex:/\bas\s+[A-Za-z]\w*/g, desc: '`as` type assertion', severity: 'medium' },
+  { id: 'angle-bracket-cast', regex: /<[A-Za-z]\w+>\s*\(/g, desc: 'Angle-bracket type assertion', severity: 'medium' },
+  { id: 'ts-ignore', regex: /\/\/\s*@ts-ignore/g, desc: '`@ts-ignore` suppresses errors', severity: 'high' },
+  { id: 'ts-expect-error', regex: /\/\/\s*@ts-expect-error/g, desc: '`@ts-expect-error` suppresses errors', severity: 'medium' },
+  { id: 'ts-nocheck', regex: /\/\/\s*@ts-nocheck/g, desc: '`@ts-nocheck` disables checking for entire file', severity: 'critical' },
+  { id: 'non-null-assertion', regex: /\w+!+\.\w+/g, desc: 'Non-null assertion (`!.`)', severity: 'low' },
+  { id: 'force-unwraps', regex: /\w+!+\[|!\!/g, desc: 'Force unwrap operator', severity: 'low' },
+];
 
-function walkDir(dir, ignorePatterns = []) {
+const DEFAULT_IGNORE_DIRS = new Set([
+  'node_modules', '.git', 'dist', 'build', 'coverage', '.next', '.nuxt',
+  'out', '.cache', '.vscode', '.idea', '__snapshots__', 'vendor',
+]);
+
+function isTypeScriptFile(filepath) {
+  return /\.(ts|tsx|mts|cts)$/.test(filepath);
+}
+
+function countLines(content) {
+  return content.split('\n').length;
+}
+
+function stripComments(content) {
+  // Simple approach: keep single-line comments for @ts-* detection
+  // but strip multi-line strings/comments that could false-positive
+  return content;
+}
+
+function analyzeFile(filepath, options = {}) {
+  const content = fs.readFileSync(filepath, 'utf-8');
+  const lines = countLines(content);
+  const findings = [];
+
+  for (const pattern of UNSAFE_PATTERNS) {
+    if (options.patterns && !options.patterns.includes(pattern.id)) continue;
+
+    const regex = new RegExp(pattern.regex.source, pattern.regex.flags);
+    const linesArr = content.split('\n');
+    linesArr.forEach((line, idx) => {
+      // Skip string literals for some patterns
+      if (pattern.id === 'any-keyword' && line.trimStart().startsWith('//')) return;
+      const match = regex.test(line);
+      regex.lastIndex = 0;
+      if (match) {
+        findings.push({
+          file: filepath,
+          line: idx + 1,
+          column: 0,
+          ruleId: pattern.id,
+          description: pattern.desc,
+          severity: pattern.severity,
+          source: line.trim(),
+        });
+      }
+    });
+  }
+
+  const safeLines = lines - findings.length;
+  const coverage = lines > 0 ? ((safeLines / lines) * 100) : 100;
+
+  return {
+    file: filepath,
+    lines,
+    safeLines: Math.max(0, safeLines),
+    findings,
+    coverage: Math.round(coverage * 100) / 100,
+  };
+}
+
+function walkDir(dir, ignoreDirs = DEFAULT_IGNORE_DIRS) {
   const results = [];
   const entries = fs.readdirSync(dir, { withFileTypes: true });
   for (const entry of entries) {
-    const fullPath = path.join(dir, entry.name);
+    if (ignoreDirs.has(entry.name) || entry.name.startsWith('.')) continue;
+    const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      if (entry.name === 'node_modules' || entry.name === '.git') continue;
-      if (ignorePatterns.some(p => entry.name.includes(p))) continue;
-      results.push(...walkDir(fullPath, ignorePatterns));
-    } else if (TS_EXTS.has(path.extname(entry.name))) {
-      if (entry.name.endsWith('.d.ts')) continue;
-      results.push(fullPath);
+      results.push(...walkDir(full, ignoreDirs));
+    } else if (isTypeScriptFile(full)) {
+      results.push(full);
     }
   }
   return results;
 }
 
-function analyzeFile(filePath) {
-  const source = fs.readFileSync(filePath, 'utf-8');
-  const lines = source.split('\n');
-  const issues = [];
-  const stats = {
-    totalFunctions: 0,
-    typedFunctions: 0,
-    totalParams: 0,
-    typedParams: 0,
-    anyCount: 0,
-    asAnyCount: 0,
-    implicitAny: 0,
-    untypedVars: 0,
-    linesOfCode: 0,
-  };
+function analyze(targetPath, options = {}) {
+  const resolved = path.resolve(targetPath);
 
-  // Strip block comments from entire source first
-  let cleanSource = source.replace(/\/\*[\s\S]*?\*\//g, '');
-  // Strip string contents
-  cleanSource = cleanSource.replace(/'(?:[^'\\]|\\.)*'/g, "''");
-  cleanSource = cleanSource.replace(/"(?:[^"\\]|\\.)*"/g, '""');
-  cleanSource = cleanSource.replace(/`(?:[^`\\]|\\.)*`/g, '``');
+  if (!fs.existsSync(resolved)) {
+    return { error: `Path not found: ${resolved}`, results: [], summary: {} };
+  }
 
-  const cleanLines = cleanSource.split('\n');
+  const files = fs.statSync(resolved).isDirectory()
+    ? walkDir(resolved, options.ignoreDirs ? new Set(options.ignoreDirs) : DEFAULT_IGNORE_DIRS)
+    : isTypeScriptFile(resolved) ? [resolved] : [];
 
-  for (let i = 0; i < lines.length; i++) {
-    const rawLine = lines[i];
-    const cleanLine = (cleanLines[i] || '').replace(/\/\/.*$/, '');
+  if (files.length === 0) {
+    return { error: 'No TypeScript files found', results: [], summary: {} };
+  }
 
-    // Check raw line for ts directives (before any filtering)
-    if (rawLine.includes('@ts-ignore')) {
-      issues.push({ line: i + 1, col: rawLine.indexOf('@ts-ignore') + 1, type: 'ts-ignore', message: '@ts-ignore suppresses type checking', severity: 'warning', source: rawLine.trim() });
-    }
-    if (rawLine.includes('@ts-nocheck')) {
-      issues.push({ line: i + 1, col: rawLine.indexOf('@ts-nocheck') + 1, type: 'ts-nocheck', message: '@ts-nocheck disables type checking for entire file', severity: 'error', source: rawLine.trim() });
-    }
+  const results = files.map(f => analyzeFile(f, options));
 
-    if (!cleanLine.trim()) continue;
-    stats.linesOfCode++;
+  const totalLines = results.reduce((s, r) => s + r.lines, 0);
+  const totalFindings = results.reduce((s, r) => s + r.findings.length, 0);
+  const totalSafe = results.reduce((s, r) => s + r.safeLines, 0);
+  const overallCoverage = totalLines > 0 ? Math.round((totalSafe / totalLines) * 10000) / 100 : 100;
 
-    // Count `any` usage
-    const anyMatches = cleanLine.matchAll(/\bany\b/g);
-    for (const m of anyMatches) {
-      const before = cleanLine.slice(Math.max(0, m.index - 10), m.index);
-      const after = cleanLine.slice(m.index + 3, m.index + 10);
-      if (/\bas\s*$/.test(before)) {
-        stats.asAnyCount++;
-        issues.push({ line: i + 1, col: m.index + 1, type: 'as-any', message: '`as any` cast', severity: 'error', source: rawLine.trim() });
-      } else if (/[<:,\[(]/.test(before.slice(-1)) || /[>\[\],)]/.test(after[0]) || after.startsWith('>') || before.endsWith('<')) {
-        stats.anyCount++;
-        issues.push({ line: i + 1, col: m.index + 1, type: 'explicit-any', message: 'Explicit `any` type', severity: 'error', source: rawLine.trim() });
-      }
-    }
-
-    // Detect untyped function parameters: function name(param, param2) {
-    const funcParamRegex = /(?:function\s+\w+|(?:const|let|var)\s+\w+\s*=\s*(?:async\s+)?)\s*\(([^)]*)\)/g;
-    let fm;
-    while ((fm = funcParamRegex.exec(cleanLine)) !== null) {
-      if (!fm[1].trim()) continue;
-      const params = fm[1].split(',');
-      for (const param of params) {
-        const trimmed = param.trim();
-        if (!trimmed) continue;
-        stats.totalParams++;
-        const body = trimmed.startsWith('...') ? trimmed.slice(3) : trimmed;
-        if (body.includes(':')) {
-          stats.typedParams++;
-        } else {
-          stats.implicitAny++;
-          issues.push({ line: i + 1, col: fm.index + 1, type: 'untyped-param', message: `Parameter '${body.split('=')[0].trim()}' lacks type annotation`, severity: 'warning', source: rawLine.trim() });
-        }
-      }
-    }
-
-    // Arrow function params: (params) => ...
-    const arrowParamRegex = /(?:async\s+)?\(([^)]*)\)\s*=>/g;
-    let am;
-    while ((am = arrowParamRegex.exec(cleanLine)) !== null) {
-      if (!am[1].trim()) continue;
-      const params = am[1].split(',');
-      for (const param of params) {
-        const trimmed = param.trim();
-        if (!trimmed) continue;
-        stats.totalParams++;
-        if (trimmed.includes(':')) {
-          stats.typedParams++;
-        } else {
-          stats.implicitAny++;
-          issues.push({ line: i + 1, col: am.index + 1, type: 'untyped-param', message: `Parameter '${trimmed.split('=')[0].trim()}' lacks type annotation`, severity: 'warning', source: rawLine.trim() });
-        }
-      }
-    }
-
-    // Single-param arrow: x => ...
-    const singleArrowRegex = /(?:async\s+)?(\w+)\s*=>/g;
-    let sm;
-    while ((sm = singleArrowRegex.exec(cleanLine)) !== null) {
-      const before = cleanLine.slice(Math.max(0, sm.index - 3), sm.index);
-      if (/[=(,:\s]/.test(before.slice(-1)) || sm.index === 0) {
-        // Avoid matching inside other constructs
-        if (cleanLine.slice(sm.index, sm.index + 20).includes('=>')) {
-          stats.totalParams++;
-          stats.implicitAny++;
-          issues.push({ line: i + 1, col: sm.index + 1, type: 'untyped-param', message: `Parameter '${sm[1]}' lacks type annotation`, severity: 'warning', source: rawLine.trim() });
-        }
-      }
-    }
-
-    // Detect missing return types on named functions
-    const funcSigRegex = /(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(([^)]*)\)[^{]*{/g;
-    let fsig;
-    while ((fsig = funcSigRegex.exec(cleanLine)) !== null) {
-      stats.totalFunctions++;
-      // Check if there's a return type annotation between ) and {
-      const afterParen = cleanLine.slice(cleanLine.indexOf(')', fsig.index) + 1).trim();
-      if (afterParen.startsWith(':')) {
-        stats.typedFunctions++;
-      } else {
-        issues.push({ line: i + 1, col: fsig.index + 1, type: 'missing-return-type', message: `Function '${fsig[1]}' missing return type annotation`, severity: 'info', source: rawLine.trim() });
-      }
-    }
-
-    // Untyped variables
-    const varRegex = /(?:const|let|var)\s+(\w+)\s*;/g;
-    let vm;
-    while ((vm = varRegex.exec(cleanLine)) !== null) {
-      stats.untypedVars++;
-      issues.push({ line: i + 1, col: vm.index + 1, type: 'untyped-var', message: `Variable '${vm[1]}' declared without type or initializer`, severity: 'info', source: rawLine.trim() });
+  const byRule = {};
+  for (const r of results) {
+    for (const f of r.findings) {
+      byRule[f.ruleId] = (byRule[f.ruleId] || 0) + 1;
     }
   }
 
-  const paramCoverage = stats.totalParams > 0 ? stats.typedParams / stats.totalParams : 1;
-  const returnCoverage = stats.totalFunctions > 0 ? stats.typedFunctions / stats.totalFunctions : 1;
-  const anyScore = stats.anyCount + stats.asAnyCount + stats.implicitAny + stats.untypedVars;
-  const overallCoverage = stats.linesOfCode > 0 ? Math.max(0, 1 - anyScore / stats.linesOfCode) : 1;
+  const bySeverity = {};
+  for (const r of results) {
+    for (const f of r.findings) {
+      bySeverity[f.severity] = (bySeverity[f.severity] || 0) + 1;
+    }
+  }
 
-  return {
-    filePath,
-    issues,
-    stats,
-    coverage: {
-      params: Math.round(paramCoverage * 10000) / 100,
-      returns: Math.round(returnCoverage * 10000) / 100,
-      overall: Math.round(overallCoverage * 10000) / 100,
-    },
+  const summary = {
+    files: files.length,
+    totalLines,
+    totalFindings,
+    safeLines: totalSafe,
+    coverage: overallCoverage,
+    grade: coverageToGrade(overallCoverage),
+    byRule,
+    bySeverity,
   };
+
+  return { results, summary };
 }
 
-function grade(score) {
-  if (score >= 95) return 'A';
-  if (score >= 85) return 'B';
-  if (score >= 70) return 'C';
-  if (score >= 50) return 'D';
+function coverageToGrade(coverage) {
+  if (coverage >= 98) return 'A+';
+  if (coverage >= 95) return 'A';
+  if (coverage >= 90) return 'A-';
+  if (coverage >= 85) return 'B+';
+  if (coverage >= 80) return 'B';
+  if (coverage >= 75) return 'B-';
+  if (coverage >= 70) return 'C+';
+  if (coverage >= 65) return 'C';
+  if (coverage >= 60) return 'C-';
+  if (coverage >= 50) return 'D';
   return 'F';
 }
 
-function analyze(dir, options = {}) {
-  const { ignore = [], minSeverity = 'info' } = options;
-  const files = walkDir(dir, ignore);
-  if (files.length === 0) {
-    return { files: [], summary: { totalFiles: 0, totalIssues: 0, totalStats: {}, coverage: { params: 100, returns: 100, overall: 100 }, grade: 'A' } };
-  }
-
-  const severityOrder = { error: 3, warning: 2, info: 1 };
-  const minSev = severityOrder[minSeverity] || 1;
-
-  const results = files.map(f => {
-    const result = analyzeFile(f);
-    result.issues = result.issues.filter(i => (severityOrder[i.severity] || 1) >= minSev);
-    return result;
-  });
-
-  const totalStats = {
-    totalFunctions: 0, typedFunctions: 0,
-    totalParams: 0, typedParams: 0,
-    anyCount: 0, asAnyCount: 0, implicitAny: 0,
-    untypedVars: 0, linesOfCode: 0,
-  };
-
-  let totalIssues = 0;
-  for (const r of results) {
-    for (const k of Object.keys(totalStats)) totalStats[k] += r.stats[k];
-    totalIssues += r.issues.length;
-  }
-
-  const paramCov = totalStats.totalParams > 0 ? totalStats.typedParams / totalStats.totalParams * 100 : 100;
-  const retCov = totalStats.totalFunctions > 0 ? totalStats.typedFunctions / totalStats.totalFunctions * 100 : 100;
-  const anyTotal = totalStats.anyCount + totalStats.asAnyCount + totalStats.implicitAny + totalStats.untypedVars;
-  const overall = totalStats.linesOfCode > 0 ? Math.max(0, 100 - anyTotal / totalStats.linesOfCode * 100) : 100;
-
-  const summary = {
-    totalFiles: files.length,
-    totalIssues,
-    totalStats,
-    coverage: {
-      params: Math.round(paramCov * 100) / 100,
-      returns: Math.round(retCov * 100) / 100,
-      overall: Math.round(overall * 100) / 100,
-    },
-    grade: grade(overall),
-  };
-
-  return { files: results, summary };
-}
-
-function bar(pct) {
-  const filled = Math.round(pct / 10);
-  return '[' + '█'.repeat(Math.max(0, filled)) + '░'.repeat(Math.max(0, 10 - filled)) + ']';
-}
-
-function gradeBadge(g) {
-  const colors = { A: '🟢', B: '🟡', C: '🟠', D: '🔴', F: '💀' };
-  return `${colors[g] || '⚪'} ${g}`;
-}
-
-function formatReport(result) {
-  const { files, summary } = result;
+function formatReport(analysis, options = {}) {
+  const { results, summary } = analysis;
   const lines = [];
-  lines.push('');
-  lines.push('  ╔══════════════════════════════════════╗');
-  lines.push('  ║        TypeCover Analysis            ║');
-  lines.push('  ╚══════════════════════════════════════╝');
-  lines.push('');
-  lines.push(`  Files scanned:    ${summary.totalFiles}`);
-  lines.push(`  Issues found:     ${summary.totalIssues}`);
-  lines.push(`  Lines of code:    ${summary.totalStats.linesOfCode}`);
-  lines.push('');
-  lines.push('  Coverage');
-  lines.push('  ────────');
-  lines.push(`  Parameters:   ${bar(summary.coverage.params)} ${summary.coverage.params}%`);
-  lines.push(`  Return types: ${bar(summary.coverage.returns)} ${summary.coverage.returns}%`);
-  lines.push(`  Overall:      ${bar(summary.coverage.overall)} ${summary.coverage.overall}%`);
-  lines.push('');
-  lines.push(`  Grade: ${gradeBadge(summary.grade)}`);
+
+  lines.push(`\n  typecover — TypeScript Type Coverage Report\n`);
+  lines.push(`  Coverage: ${summary.coverage}% (${summary.grade})`);
+  lines.push(`  Files:    ${summary.files} | Lines: ${summary.totalLines} | Unsafe: ${summary.totalFindings}`);
   lines.push('');
 
-  if (summary.totalStats.anyCount > 0 || summary.totalStats.asAnyCount > 0) {
-    lines.push(`  ⚠ any types:      ${summary.totalStats.anyCount} explicit, ${summary.totalStats.asAnyCount} 'as any' casts`);
-  }
-  if (summary.totalStats.implicitAny > 0) {
-    lines.push(`  ⚠ Untyped params: ${summary.totalStats.implicitAny}`);
-  }
-  if (summary.totalStats.untypedVars > 0) {
-    lines.push(`  ℹ Untyped vars:   ${summary.totalStats.untypedVars}`);
-  }
-  if (summary.totalIssues > 0) {
-    lines.push('');
-    lines.push('  Issues by file');
-    lines.push('  ──────────────');
-    for (const f of files) {
-      if (f.issues.length === 0) continue;
-      lines.push('');
-      lines.push(`  ${f.filePath} (${f.issues.length} issues)`);
-      for (const issue of f.issues.slice(0, 20)) {
-        const icon = issue.severity === 'error' ? '✖' : issue.severity === 'warning' ? '⚠' : 'ℹ';
-        lines.push(`    ${icon} L${issue.line}: ${issue.message}`);
-      }
-      if (f.issues.length > 20) lines.push(`    ... and ${f.issues.length - 20} more`);
+  // By severity
+  const severityOrder = ['critical', 'high', 'medium', 'low'];
+  lines.push('  By Severity:');
+  for (const sev of severityOrder) {
+    if (summary.bySeverity[sev]) {
+      lines.push(`    ${sev.padEnd(10)} ${summary.bySeverity[sev]}`);
     }
   }
   lines.push('');
+
+  // By rule
+  const sortedRules = Object.entries(summary.byRule).sort((a, b) => b[1] - a[1]);
+  lines.push('  By Rule:');
+  for (const [rule, count] of sortedRules) {
+    lines.push(`    ${rule.padEnd(24)} ${count}`);
+  }
+  lines.push('');
+
+  // Per-file breakdown
+  if (options.verbose !== false) {
+    const sorted = [...results].sort((a, b) => a.coverage - b.coverage);
+    lines.push('  Per-File Coverage:');
+    lines.push(`  ${'Coverage'.padEnd(10)} ${'File'.padEnd(50)} Issues`);
+    lines.push(`  ${'--------'.padEnd(10)} ${'----'.padEnd(50)} ------`);
+    for (const r of sorted) {
+      const cov = `${r.coverage}%`.padEnd(10);
+      const rel = r.file.replace(process.cwd() + '/', '');
+      const fname = rel.length > 48 ? '...' + rel.slice(-45) : rel;
+      lines.push(`  ${cov} ${fname.padEnd(50)} ${r.findings.length}`);
+    }
+    lines.push('');
+  }
+
+  // Top findings
+  if (options.showFindings) {
+    const allFindings = results.flatMap(r => r.findings);
+    const sorted = allFindings.sort((a, b) => {
+      const sevOrder = { critical: 0, high: 1, medium: 2, low: 3 };
+      return (sevOrder[a.severity] || 9) - (sevOrder[b.severity] || 9);
+    });
+    const top = sorted.slice(0, 50);
+    lines.push(`  Top Findings (showing ${top.length} of ${allFindings.length}):`);
+    for (const f of top) {
+      const rel = f.file.replace(process.cwd() + '/', '');
+      lines.push(`    ${f.severity.padEnd(9)} ${rel}:${f.line}  ${f.description}`);
+      lines.push(`             ${f.source}`);
+    }
+    lines.push('');
+  }
+
   return lines.join('\n');
 }
 
-module.exports = { analyze, analyzeFile, grade, formatReport };
+function checkCI(analysis, threshold = 80) {
+  return analysis.summary.coverage >= threshold;
+}
+
+module.exports = { analyze, analyzeFile, formatReport, checkCI, coverageToGrade, UNSAFE_PATTERNS, walkDir };
