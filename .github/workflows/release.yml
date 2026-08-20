@@ -35,7 +35,7 @@ jobs:
       # Publish is DISABLED fleet-wide until NPM_TOKEN/OIDC is configured (flag #4).
       # v2.1.0 input names: version-script / commit-message / pr-title / publish-script (NOT v1's version/commit/title/publish).
       - name: Create Release Pull Request
-        uses: changesets/action@v2.1.0
+        uses: changesets/action@v2.1.1
         with:
           version-script: npx changeset version
           commit-message: "chore(release): version packages"
