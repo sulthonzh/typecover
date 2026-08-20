@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+jobs:
+  release:
+    name: Version & Publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      # Adjust to repo's package manager + lockfile:
+      # npm → npm ci | pnpm → pnpm install --frozen-lockfile | yarn → yarn install --frozen-lockfile
+      # (repos without lockfiles: npm ci)
+      - run: npm ci
+
+      # Publish is DISABLED fleet-wide until NPM_TOKEN/OIDC is configured (flag #4).
+      # v2.1.0 input names: version-script / commit-message / pr-title / publish-script (NOT v1's version/commit/title/publish).
+      - name: Create Release Pull Request
+        uses: changesets/action@v2.1.0
+        with:
+          version-script: npx changeset version
+          commit-message: "chore(release): version packages"
+          pr-title: "chore(release): version packages"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── To ENABLE npm publishing later (needs NPM_TOKEN or OIDC per flag #1/#7) ──
+      # Replace the step above with:
+      #   - name: Create Release Pull Request or Publish
+      #     uses: changesets/action@v2.1.0
+      #     with:
+      #       publish-script: npx changeset publish
+      #       version-script: npx changeset version
+      #       commit-message: "chore(release): version packages"
+      #       pr-title: "chore(release): version packages"
+      #     env:
+      #       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      #       NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      #       NPM_CONFIG_PROVENANCE: "true"
+      # Prereqs: @changesets/cli v3 devDep + Node >= 22 (flag #28).

@@ -3,11 +3,36 @@
   "version": "1.0.0",
   "description": "Analyze TypeScript codebases for type safety coverage. Find unsafe patterns like any, type assertions, ts-ignore, and more.",
   "main": "index.js",
-  "bin": { "typecover": "./cli.js" },
-  "scripts": { "test": "node test.js" },
-  "keywords": ["typescript", "type-coverage", "type-safety", "any", "ts-ignore", "lint", "static-analysis"],
-  "author": "sulthonzh",
+  "bin": {
+    "typecover": "./cli.js"
+  },
+  "files": [
+    "index.js",
+    "cli.js",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test.js"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sulthonzh/typecover.git"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^3.0.0"
+  },
   "license": "MIT",
-  "engines": { "node": ">=16" },
-  "files": ["index.js", "cli.js", "README.md"]
+  "keywords": [
+    "typescript",
+    "type-coverage",
+    "type-safety",
+    "any",
+    "ts-ignore",
+    "lint",
+    "static-analysis"
+  ],
+  "author": "sulthonzh"
 }
